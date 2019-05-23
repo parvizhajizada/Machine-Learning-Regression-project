@@ -1,0 +1,575 @@
+---
+title: "House Sales Price prediction with machine learning"
+author: "Parviz Hajizada"
+output: html_document
+---
+
+
+# Introduction
+For those who lived through 2007-2008 may not forget the Financial Crisis, which is mentioned as one of most devastating financial crisis after the Great Depression in 1930s.
+
+The crisis started from subprime mortage market in the United States and then quickly affected the banking system worldwide. One of the most basic problem that contributes to the crisis is overestimation or underestimation of house prices.
+
+Before the crisis, machine learning was not widely used due to the cost of technology. Perhaps, if machine learning was used back then, consumer might have clear insight before signing the mortage contract. In this paper, I am building few models to predict house prices in King County - Washington between May 2014 and May 2015.
+
+Data set can be found from the following [link](https://www.kaggle.com/harlfoxem/housesalesprediction).
+
+
+### Load necessary packages
+```{r message=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+library(tibble)
+library(corrplot)
+library(ggplot2)
+library(AER)
+library(lmtest)
+library(nnet)
+library(MASS)
+library(caret)
+library(verification)
+library(e1071)
+library(janitor)
+library(class)
+library(kernlab)
+library(verification)
+library(tidyverse)
+library(gmodels)
+library(vcd)
+library(lubridate)
+library(gridExtra)
+library(devtools)
+library(maps)
+library(mapdata)
+library(ggmap)
+```
+
+### Import data
+```{r warning = FALSE, message = FALSE}
+house <- read_csv("kc_house_data.csv")
+dim(house)
+```
+
+
+# Exploratory Data Analysis
+### Descriptive statistics
+```{r}
+any(is.na(house)) 
+```
+
+```{r}
+summary(house) 
+```
+
+```{r}
+sapply(house, class) %>% 
+  unlist()
+```
+
+## Feature engineering
+```{r}
+table(house$yr_renovated)
+```
+
+20699 house has never been renovated out of 21613 which is around 96%. We could feature engineer a column such as time passed since renovation but we will not because most of the house have never been renovated. So we will feature engineer a column which shows if the house has been renovated or not regardless of year and we drop the yr_renovated column afterwards
+
+#### Creating binary renovated column
+```{r}
+house <- house %>% mutate(year = year(date),     
+                          # year at which the house is sold
+                          month = month(date),   
+                          # month at which the house is sold
+                          age = year - yr_built, 
+                          # time interval between year build 
+                          # and year sold (i.e. age of house)
+                          renovated = factor(ifelse(yr_renovated != 0, 1,0))) # 1 if the house                            is renovated, 0 if it is not
+```
+
+#### Dropping the yr_renovated column
+```{r}
+house$yr_renovated <- NULL 
+```
+
+There are only two years so it is not likely to give much information and for the sake of model simplicity and for not making out of sample prediction infeasible, we decide to forego the marginal information gain Month variable stays because it has seasonal variations and it does not make out of sample prediction infeasible unlike year variable
+
+#### Dropping the year column
+```{r}
+house$year <- NULL
+```
+
+id variable gives no information and date column enables us to see how price changes over time but once the year and month columns were created, we do not need the date column itself.
+
+#### Dropping id and date columns
+```{r}
+house$id <- NULL
+house$date <- NULL
+```
+
+latitude and longitude variables are good for making heat map of price over a map which is done below but it is not so intiutive to expect the price being dependent on those variables explicitly. For that reason, we find the zipcode variable as a better location factor affecting the price and use it in estimation instead of latitude,longitude.
+
+#### Distribution of zipcodes
+```{r}
+table(house$zipcode)
+```
+
+Kind of uniformaly distributed or at least not inbalanced. Not likely to overfit.
+
+#### Distribution of number of bedrooms
+```{r}
+table(house$bedrooms)
+```
+0 bedroom does not make much sense, hard to say if it is wrong data entry or there really are houses without any bedroom. But we can safely drop these values because there are only 13 of them. Number of houses with 7 and more bedrooms are quite little such that we will aggregate them under 7+ bedrooms level. We drop the house with 33 bedrooms because it is an explicit outlier.
+
+```{r}
+house <- house %>% filter(bedrooms !=0, bedrooms !=33) 
+house$bedrooms[house$bedrooms > 7] <- 7
+```
+
+#### Factorize the bedroom variable
+```{r}
+house$bedrooms <- factor(house$bedrooms)
+```
+
+####  Changing last level from 7 to 6+
+```{r}
+levels(house$bedrooms)
+levels(house$bedrooms)[7] <- "6+"
+```
+
+####  Do the similar data processing to bathrooms column also
+```{r}
+table(house$bathrooms)
+```
+
+```{r}
+# drop observations with rare number of bathrooms
+house <- house %>% filter(bathrooms !=0, bathrooms !=0.5,
+                          bathrooms !=0.75, bathrooms !=1.25) 
+
+# values above 3.75 will be coded as 3.75
+house$bathrooms[house$bathrooms > 3.75] <- 3.75
+house$bathrooms <- factor(house$bathrooms)
+
+# Changing last level from 3.75 to 3.5+
+levels(house$bathrooms)
+levels(house$bathrooms)[11] <- "3.5+"
+```
+
+#### Do the similar data processing to floors column also
+
+```{r}
+table(house$floors)
+```
+
+```{r}
+# drop observations with rare number of floors
+house <- house %>% filter(floors !=3.5) 
+
+# values above 2.5 will be coded as 2.5
+house$floors[house$floors > 2.5] <- 2.5
+house$floors <- factor(house$floors)
+
+# Changing last level from 2.5 to 2+
+levels(house$floors)
+levels(house$floors)[4] <- "2+"
+```
+
+
+#### Do the similar data processing to grade column also
+```{r}
+table(house$grade)
+```
+
+```{r}
+# values above 12 will be coded as 12
+house$grade[house$grade > 12] <- 12
+house$grade <- factor(house$grade)
+
+# Changing last level from 12 to 12+
+levels(house$grade)
+levels(house$grade)[9] <- "11+"
+```
+
+#### Do the similar data processing to condition column
+```{r}
+table(house$condition)
+```
+
+```{r}
+house$condition[house$condition < 2] <- 2
+house$condition <- factor(house$condition)
+
+# Changing last level from 12 to 12+
+levels(house$condition)
+levels(house$condition)[1] <- "3-"
+```
+
+#### Distribution of age variable
+```{r}
+table(house$age)
+```
+
+```{r}
+# Drop observations with age being equal to -1 (Data entry mistake)
+house <- house %>% filter(age !=-1)
+```
+
+```{r}
+# Drop yr_built column because it is unnecassary once we have age column
+cor(house$yr_built, house$age) 
+```
+
+```{r}
+# validation of claim by calculating correlation -0.999 correlation or by the fact that age is linear transformation of yr_built.
+house$yr_built <- NULL
+```
+
+#### Changing class of certain variables 
+```{r}
+vars_factor <- c("waterfront", "view", "zipcode", "month")
+house[vars_factor] <- lapply(house[vars_factor], factor)
+```
+
+#### Drop highly correlated columns
+```{r}
+M <- cor(house[,c("price", "sqft_living", "sqft_lot", 
+                  "sqft_basement", "age", 
+                  "sqft_above", "sqft_living15", "sqft_lot15")])
+corrplot.mixed(M) 
+```
+
+# Modelling
+## Data Partitioning
+```{r}
+set.seed(1)
+which_train <- createDataPartition(house$price, 
+                                   p = 0.8, 
+                                   list = FALSE) 
+```
+
+## Split data into training and test set 
+```{r}
+train <- house[which_train,]
+test <- house[-which_train,]
+```
+
+### Data Visualization
+```{r echo=FALSE, warning = FALSE, message = FALSE}
+p1 <- ggplot(train, aes(x=sqft_living, y=price)) + 
+  geom_point()+
+  geom_smooth()
+
+p2 <- ggplot(train, aes(x=sqft_lot, y=price)) + 
+  geom_point()+
+  geom_smooth()
+
+p3 <- ggplot(train, aes(x=sqft_basement, y=price)) + 
+  geom_point()+
+  geom_smooth()
+
+grid.arrange(p1, p2, p3, ncol = 3)
+```
+
+```{r echo=FALSE}
+p4 <- ggplot(data=train, aes(x=bedrooms, y=price)) +
+  geom_bar(stat="identity")
+
+p5 <- ggplot(data=train, aes(x=bathrooms, y=price)) +
+  geom_bar(stat="identity")
+
+p6 <- ggplot(data=train, aes(x=floors, y=price)) +
+  geom_bar(stat="identity")
+
+p7 <- ggplot(data=train, aes(x=waterfront, y=price)) +
+  geom_bar(stat="identity")
+
+p8 <- ggplot(data=train, aes(x=view, y=price)) +
+  geom_bar(stat="identity")
+
+p9 <- ggplot(data=train, aes(x=condition, y=price)) +
+  geom_bar(stat="identity")
+
+p10 <- ggplot(data=train, aes(x=grade, y=price)) +
+  geom_bar(stat="identity")
+
+p11 <- ggplot(data=train, aes(x=month, y=price)) +
+  geom_bar(stat="identity")
+
+p12 <- ggplot(data=train, aes(x=renovated, y=price)) +
+  geom_bar(stat="identity")
+
+grid.arrange(p4, p5, p6 ,p7 ,p8,
+             p9 ,p10 ,p11, p12,
+             nrow = 3, ncol=3)
+```
+
+### Map of King County
+```{r echo=FALSE}
+states <- map_data("state")
+ca_df <- subset(states, region == "washington")
+counties <- map_data("county")
+ca_county <- subset(counties, region == "washington")
+king_county <- subset(ca_county, subregion == "king")
+ca_base <- ggplot(data = king_county, mapping = aes(x = long, y = lat, group = group)) + 
+  geom_polygon(color = "black", fill = "gray")
+ca_base
+```
+
+### Heat map of King County
+```{r echo=FALSE}
+b <- ggplot(house, aes(x = long, y = lat))+
+  geom_point(aes(color = price)) +
+  scale_color_gradientn(colours = rainbow(5)) +
+  theme(legend.position = "right")
+b
+```
+
+### More visualization
+```{r echo=FALSE}
+ggplot(train, aes(x=sqft_living, y=price, color = bathrooms)) + 
+  geom_point()
+```
+
+```{r echo=FALSE}
+avg_price_ren <- house %>% group_by(renovated) %>% summarize(average_price = mean(price))
+ggplot(avg_price_ren, aes(x = renovated, y = average_price, fill = renovated)) + 
+  geom_bar(stat = "identity") +
+  ggtitle("Mean price VS renovated")
+```
+
+```{r echo=FALSE}
+avg_price_view <- house %>% group_by(view) %>% summarize(average_price = mean(price))
+ggplot(avg_price_view, aes(x = view, y = average_price, fill = view)) + 
+  geom_bar(stat = "identity") +
+  ggtitle("Mean price VS view")
+```
+
+## Linear Regression
+```{r}
+set.seed(1)
+
+formula <- price ~ bedrooms + bathrooms + sqft_living +
+  sqft_lot + floors + waterfront + view + condition + 
+  grade + sqft_basement + zipcode +
+  month + renovated
+
+linear.train <- 
+  train(formula, 
+        data = train, 
+        method = "lm")
+```
+
+### Fitted values
+```{r}
+linear.train_fitted <- predict(linear.train, train)
+```
+
+### Predicted values
+```{r}
+linear.train_forecasts <- predict(linear.train, test)
+```
+
+### RMSE, R^2, MAE of test set
+```{r}
+error_measure.lm <- postResample(pred = linear.train_forecasts, obs = test$price)
+```
+
+### RMSE, R^2, MAE of train set
+```{r}
+postResample(pred = linear.train_fitted, obs = train$price)
+```
+
+## SVM linear
+### Setting train control
+```{r}
+ctrl_cv2 <- trainControl(method = "cv",
+                         number = 2)
+```
+### Parameters of svmLinear
+```{r}
+modelLookup("svmLinear")
+```
+### Grid search
+```{r}
+parametersC <- data.frame(C = c(0.01, 0.1, 0.2, 0.5, 1, 5))
+```
+### Train data
+```{r}
+set.seed(1)
+svm_Linear <- train(formula, 
+                    data = train, 
+                    method = "svmLinear",
+                    tuneGrid = parametersC,
+                    trControl = ctrl_cv2)
+```
+
+### Fitted values
+```{r}
+svm_linear.train_fitted <- predict(svm_Linear, train)
+```
+
+### Predicted values
+```{r}
+svm_linear.train_forecasts <- predict(svm_Linear, test)
+```
+
+### RMSE, R^2, MAE of test set
+```{r}
+error_measure.svm_linear <- postResample(pred = svm_linear.train_forecasts, obs = test$price)
+```
+
+#### RMSE, R^2, MAE of train set
+```{r}
+postResample(pred = svm_linear.train_fitted, obs = train$price)
+```
+
+## SVM radial
+### Parameters of svmRadial
+```{r}
+modelLookup("svmRadial")
+```
+
+### Grid Search
+```{r}
+parametersC_sigma <- 
+  expand.grid(C = c(0.01, 0.05, 0.1, 0.5, 1, 5),
+              sigma = c(0.05, 0.1, 0.2, 0.5, 1))
+```              
+
+### Train data
+```{r}
+set.seed(1)
+svm_radial <- train(formula, 
+                    data = train, 
+                    method = "svmRadial",
+                    tuneGrid = parametersC_sigma,
+                    trControl = ctrl_cv2)
+```
+
+### Fitted values
+```{r}
+svm_radial.train_fitted <- predict(svm_radial, train)
+```
+
+### Predicted values
+```{r}
+svm_radial.train_forecasts <- predict(svm_radial, test)
+```
+
+### RMSE, R^2, MAE of test set
+```{r}
+error_measure.svm_radial <- postResample(pred = svm_radial.train_forecasts, obs = test$price)
+```
+
+### RMSE, R^2, MAE of train set
+```{r}
+postResample(pred = svm_radial.train_fitted, obs = train$price)
+```
+
+## Treebag
+### Parameters of Treebag
+```{r}
+modelLookup("treebag")
+```
+
+### Train data
+```{r}
+set.seed(1)
+treebag.train <- train(formula, 
+                       data = train, 
+                       method = "treebag")
+```
+
+### Fitted values
+```{r}
+treebag.train_fitted <- predict(treebag.train, train)
+```
+
+### Predicted values
+```{r}
+treebag.train_forecasts <- predict(treebag.train, test)
+```
+
+### RMSE, R^2, MAE of test set
+```{r}
+error_measure.treebag <- postResample(pred = treebag.train_forecasts, obs = test$price)
+```
+
+### RMSE, R^2, MAE of train set
+```{r}
+postResample(pred = treebag.train_fitted, obs = train$price)
+```
+
+## Bayesglm 
+```{r}
+modelLookup("bayesglm")
+```
+###  Train data
+```{r}
+set.seed(1)
+bayesglm.train <- train(formula, 
+                        data = train, 
+                        method = "bayesglm")
+```
+
+### Fitted values
+```{r}
+bayesglm.train_fitted <- predict(bayesglm.train, train)
+```
+
+### Predicted values
+```{r}
+bayesglm.train_forecasts <- predict(bayesglm.train, test)
+```
+
+### RMSE, R^2, MAE of test set
+```{r}
+error_measure.bayes_glm <-postResample(pred = bayesglm.train_forecasts, obs = test$price)
+```
+
+# RMSE, R^2, MAE of train set
+```{r}
+postResample(pred = bayesglm.train_fitted, obs = train$price)
+```
+
+## CART
+```{r}
+modelLookup("rpart1SE")
+```
+
+### Train data
+```{r}
+set.seed(1)
+rpart1SE.train <- train(formula, 
+                        data = train, 
+                        method = "rpart1SE")
+```
+
+### Fitted values
+```{r}
+rpart1SE.train_fitted <- predict(rpart1SE.train, train)
+```
+
+### Predicted values
+```{r}
+rpart1SE.train_forecasts <- predict(rpart1SE.train, test)
+```
+
+### RMSE, R^2, MAE of test set
+```{r}
+error_measure.cart <- postResample(pred = rpart1SE.train_forecasts, obs = test$price)
+```
+
+### RMSE, R^2, MAE of train set
+```{r}
+postResample(pred = rpart1SE.train_fitted, obs = train$price)
+```
+
+# Conclusion
+```{r}
+error_measures <- data.frame(error_measure.lm, error_measure.svm_linear,
+                             error_measure.svm_radial, error_measure.treebag,
+                             error_measure.bayes_glm, error_measure.cart)
+names(error_measures) <- c("lm","svm_linear","svm_radial","treebag","bayesglm","cart")
+error_measures
+```
